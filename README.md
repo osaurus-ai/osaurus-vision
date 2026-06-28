@@ -1,6 +1,6 @@
-# Osaurus Vision
+# Vision
 
-An Osaurus plugin that provides macOS Vision framework capabilities for AI agents. Enables text detection, face analysis, background removal, pose detection, and more.
+An Osaurus plugin (display name **Vision**, plugin id `osaurus.vision`) that provides macOS Vision framework capabilities for AI agents. Enables text detection, face analysis, background removal, pose detection, and more.
 
 ## Tools
 

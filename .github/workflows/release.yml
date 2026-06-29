@@ -2,12 +2,13 @@ name: Release
 
 on:
   push:
-    tags: ['v*', '[0-9]+.[0-9]+.[0-9]+']
-
-permissions:
-  contents: write
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
   release:
-    uses: dinoki-ai/osaurus-tools/.github/workflows/build-plugin.yml@master
+    uses: osaurus-ai/osaurus-tools/.github/workflows/build-plugin.yml@master
+    permissions:
+      contents: write
     secrets: inherit

@@ -18,10 +18,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "osaurus_vision_tests",
-            dependencies: [],
-            path: "Tests",
-            resources: [.copy("Resources")]
+            name: "osaurus_visionTests",
+            dependencies: ["osaurus_vision"],
+            path: "Tests/osaurus_visionTests"
         )
     ]
 )

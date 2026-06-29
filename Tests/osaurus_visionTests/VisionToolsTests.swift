@@ -366,7 +366,7 @@ struct VisionPluginTests {
     let manifest = invoker.getManifest()
 
     #expect(manifest["plugin_id"] as? String == "osaurus.vision")
-    #expect(manifest["name"] as? String == "Osaurus Vision")
+    #expect(manifest["name"] as? String == "Vision")
     #expect(manifest["version"] as? String == "0.1.0")
 
     let capabilities = manifest["capabilities"] as! [String: Any]
@@ -537,9 +537,10 @@ struct PDFSupportTests {
         "page": 99
       ])
 
-    #expect(result["error"] != nil)
-    let error = result["error"] as? String
-    #expect(error?.contains("page") == true)
+    #expect(result["ok"] as? Bool == false)
+    #expect(result["kind"] as? String == "invalid_args")
+    let message = result["message"] as? String
+    #expect(message?.contains("page") == true)
   }
 }
 
@@ -1019,8 +1020,7 @@ struct RemoveBackgroundTests {
     print("Remove background result: \(result)")
 
     // Check that output is PNG even if input path didn't end in .png
-    if result["error"] == nil {
-      let outputPath = result["output_path"] as? String ?? ""
+    if let outputPath = result["output_path"] as? String {
       #expect(outputPath.hasSuffix(".png"))
     }
   }
@@ -1042,8 +1042,7 @@ struct RemoveBackgroundTests {
       ])
 
     // Should convert to PNG for transparency
-    if result["error"] == nil {
-      let outputPath = result["output_path"] as? String ?? ""
+    if let outputPath = result["output_path"] as? String {
       #expect(outputPath.hasSuffix(".png"))
     }
   }
@@ -1062,8 +1061,11 @@ struct ErrorHandlingTests {
         "image_path": "/nonexistent/path/image.jpg"
       ])
 
-    #expect(result["error"] != nil)
-    print("Error: \(result["error"] ?? "none")")
+    // Missing input file -> not_found failure envelope (non-retryable).
+    #expect(result["ok"] as? Bool == false)
+    #expect(result["kind"] as? String == "not_found")
+    #expect(result["retryable"] as? Bool == false)
+    print("Error: \(result["message"] ?? "none")")
   }
 
   @Test("Handle invalid arguments")
@@ -1072,7 +1074,10 @@ struct ErrorHandlingTests {
 
     let result = invoker.invoke(tool: "detect_text", args: [:])
 
-    #expect(result["error"] != nil)
+    // Missing required args -> invalid_args failure envelope (retryable).
+    #expect(result["ok"] as? Bool == false)
+    #expect(result["kind"] as? String == "invalid_args")
+    #expect(result["retryable"] as? Bool == true)
   }
 
   @Test("Handle unknown tool")
@@ -1085,8 +1090,10 @@ struct ErrorHandlingTests {
         "image_path": "/some/path.jpg"
       ])
 
-    #expect(result["error"] != nil)
-    let error = result["error"] as? String
-    #expect(error?.contains("Unknown tool") == true)
+    // Unknown tool id -> not_found failure envelope.
+    #expect(result["ok"] as? Bool == false)
+    #expect(result["kind"] as? String == "not_found")
+    let message = result["message"] as? String
+    #expect(message?.contains("Unknown tool") == true)
   }
 }

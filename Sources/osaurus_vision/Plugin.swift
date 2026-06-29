@@ -16,12 +16,31 @@ private enum VisionError: Error, LocalizedError {
   case imageLoadFailed(String)
   case invalidPath(String)
   case saveFailed(String)
+  case fileNotFound(String)
+  case invalidArguments(String)
 
-  var errorDescription: String? {
+  var errorDescription: String? { message }
+
+  /// Human-readable message embedded in the failure envelope.
+  var message: String {
     switch self {
     case .imageLoadFailed(let path): return "Failed to load image: \(path)"
     case .invalidPath(let path): return "Invalid path: \(path)"
     case .saveFailed(let path): return "Failed to save image: \(path)"
+    case .fileNotFound(let path): return "File not found: \(path)"
+    case .invalidArguments(let detail): return detail
+    }
+  }
+
+  /// Maps each failure to the canonical host envelope kind.
+  /// - invalid path / bad arguments -> invalid_args
+  /// - missing input file           -> not_found
+  /// - load / Vision / save failure -> execution_error
+  var kind: Envelope.Kind {
+    switch self {
+    case .invalidPath, .invalidArguments: return .invalidArgs
+    case .fileNotFound: return .notFound
+    case .imageLoadFailed, .saveFailed: return .executionError
     }
   }
 }
@@ -38,9 +57,15 @@ private enum VisionHelper {
   }
 
   static func loadImage(from path: String, context: FolderContext?) throws -> CGImage {
+    guard !path.isEmpty else {
+      throw VisionError.invalidArguments("image_path must not be empty")
+    }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
       throw VisionError.invalidPath("Path outside working directory")
+    }
+    guard FileManager.default.fileExists(atPath: absolutePath) else {
+      throw VisionError.fileNotFound(absolutePath)
     }
     guard let nsImage = NSImage(contentsOfFile: absolutePath),
       let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -54,9 +79,15 @@ private enum VisionHelper {
   static func loadImageOrPDF(
     from path: String, context: FolderContext?, page: Int = 1, dpi: Int = 300
   ) throws -> CGImage {
+    guard !path.isEmpty else {
+      throw VisionError.invalidArguments("image_path must not be empty")
+    }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
       throw VisionError.invalidPath("Path outside working directory")
+    }
+    guard FileManager.default.fileExists(atPath: absolutePath) else {
+      throw VisionError.fileNotFound(absolutePath)
     }
 
     let url = URL(fileURLWithPath: absolutePath)
@@ -85,7 +116,7 @@ private enum VisionHelper {
     guard pageIndex >= 0, pageIndex < pdfDocument.pageCount,
       let pdfPage = pdfDocument.page(at: pageIndex)
     else {
-      throw VisionError.imageLoadFailed(
+      throw VisionError.invalidArguments(
         "PDF page \(page) not found (document has \(pdfDocument.pageCount) pages)")
     }
 
@@ -207,26 +238,17 @@ private enum VisionHelper {
     ["x": point.x * imageSize.width, "y": (1 - point.y) * imageSize.height]
   }
 
-  static func escapeJSON(_ string: String) -> String {
-    string
-      .replacingOccurrences(of: "\\", with: "\\\\")
-      .replacingOccurrences(of: "\"", with: "\\\"")
-      .replacingOccurrences(of: "\n", with: "\\n")
-      .replacingOccurrences(of: "\r", with: "\\r")
-      .replacingOccurrences(of: "\t", with: "\\t")
-  }
-
+  /// Serializes a successful result payload. The host auto-wraps this
+  /// non-envelope success output as {"ok":true,"result":<payload>}, so the
+  /// success shape is intentionally left unwrapped here. Only the encoding
+  /// failure path emits an explicit failure envelope.
   static func jsonResult(_ object: [String: Any]) -> String {
     guard let data = try? JSONSerialization.data(withJSONObject: object),
       let json = String(data: data, encoding: .utf8)
     else {
-      return "{\"error\": \"JSON encoding failed\"}"
+      return Envelope.failure(.executionError, "JSON encoding failed")
     }
     return json
-  }
-
-  static func errorResult(_ error: Error) -> String {
-    "{\"error\": \"\(escapeJSON(error.localizedDescription))\"}"
   }
 }
 
@@ -243,12 +265,14 @@ extension VisionTool {
     guard let data = args.data(using: .utf8),
       let input = try? JSONDecoder().decode(Args.self, from: data)
     else {
-      return "{\"error\": \"Invalid arguments\"}"
+      return Envelope.failure(.invalidArgs, "Invalid arguments")
     }
     do {
       return VisionHelper.jsonResult(try execute(input: input))
+    } catch let error as VisionError {
+      return Envelope.failure(error.kind, error.message)
     } catch {
-      return VisionHelper.errorResult(error)
+      return Envelope.failure(.executionError, error.localizedDescription)
     }
   }
 }
@@ -910,6 +934,9 @@ private struct GetPDFInfoTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    guard !input.pdf_path.isEmpty else {
+      throw VisionError.invalidArguments("pdf_path must not be empty")
+    }
     let absolutePath = VisionHelper.resolvePath(input.pdf_path, context: input._context)
     guard VisionHelper.validatePath(absolutePath, context: input._context) else {
       throw VisionError.invalidPath("Path outside working directory")
@@ -917,7 +944,11 @@ private struct GetPDFInfoTool: VisionTool {
 
     let url = URL(fileURLWithPath: absolutePath)
     guard url.pathExtension.lowercased() == "pdf" else {
-      throw VisionError.imageLoadFailed("File is not a PDF: \(input.pdf_path)")
+      throw VisionError.invalidArguments("File is not a PDF: \(input.pdf_path)")
+    }
+
+    guard FileManager.default.fileExists(atPath: absolutePath) else {
+      throw VisionError.fileNotFound(absolutePath)
     }
 
     guard let pdfDocument = PDFDocument(url: url) else {
@@ -989,7 +1020,7 @@ private class PluginContext {
   }
 
   func invoke(toolId: String, payload: String) -> String {
-    tools[toolId]?(payload) ?? "{\"error\": \"Unknown tool: \(toolId)\"}"
+    tools[toolId]?(payload) ?? Envelope.failure(.notFound, "Unknown tool: \(toolId)")
   }
 }
 
@@ -1016,10 +1047,13 @@ private func makeCString(_ s: String) -> UnsafePointer<CChar>? {
 
 // MARK: - Manifest
 
-private let manifest = """
+/// File-scope manifest JSON embedded in the dylib and returned by `get_manifest`.
+/// Exposed as `internal` (not `private`) so unit tests can parse it via
+/// `@testable import osaurus_vision`.
+let visionManifestJSON = """
   {
     "plugin_id": "osaurus.vision",
-    "name": "Osaurus Vision",
+    "name": "Vision",
     "version": "0.1.0",
     "description": "macOS Vision framework integration for image analysis, text detection, face detection, background removal, and more",
     "license": "MIT",
@@ -1264,7 +1298,7 @@ nonisolated(unsafe) private var api: osr_plugin_api = {
     Unmanaged<PluginContext>.fromOpaque(ctxPtr).release()
   }
 
-  api.get_manifest = { _ in makeCString(manifest) }
+  api.get_manifest = { _ in makeCString(visionManifestJSON) }
 
   api.invoke = { ctxPtr, typePtr, idPtr, payloadPtr in
     guard let ctxPtr, let typePtr, let idPtr, let payloadPtr else { return nil }
@@ -1275,7 +1309,7 @@ nonisolated(unsafe) private var api: osr_plugin_api = {
     let payload = String(cString: payloadPtr)
 
     guard type == "tool" else {
-      return makeCString("{\"error\": \"Unknown capability type\"}")
+      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type: \(type)"))
     }
 
     return makeCString(ctx.invoke(toolId: id, payload: payload))

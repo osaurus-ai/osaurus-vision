@@ -367,7 +367,7 @@ struct VisionPluginTests {
 
     #expect(manifest["plugin_id"] as? String == "osaurus.vision")
     #expect(manifest["name"] as? String == "Vision")
-    #expect(manifest["version"] as? String == "0.1.0")
+    #expect(manifest["version"] as? String == "1.0.2")
 
     let capabilities = manifest["capabilities"] as! [String: Any]
     let tools = capabilities["tools"] as! [[String: Any]]
@@ -1074,10 +1074,10 @@ struct ErrorHandlingTests {
 
     let result = invoker.invoke(tool: "detect_text", args: [:])
 
-    // Missing required args -> invalid_args failure envelope (retryable).
+    // Missing required args -> invalid_args failure envelope (non-retryable).
     #expect(result["ok"] as? Bool == false)
     #expect(result["kind"] as? String == "invalid_args")
-    #expect(result["retryable"] as? Bool == true)
+    #expect(result["retryable"] as? Bool == false)
   }
 
   @Test("Handle unknown tool")

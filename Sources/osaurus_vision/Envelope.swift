@@ -26,8 +26,8 @@ enum Envelope {
 
   private static func defaultRetryable(for kind: Kind) -> Bool {
     switch kind {
-    case .invalidArgs, .executionError, .unavailable: return true
-    case .notFound: return false
+    case .executionError, .unavailable: return true
+    case .invalidArgs, .notFound: return false
     }
   }
 

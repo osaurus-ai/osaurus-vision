@@ -57,7 +57,7 @@ struct EnvelopeTests {
   @Test("failure round-trips to a well-formed envelope with default retryable")
   func testFailureDefaults() throws {
     let cases: [(Envelope.Kind, String, Bool)] = [
-      (.invalidArgs, "invalid_args", true),
+      (.invalidArgs, "invalid_args", false),
       (.executionError, "execution_error", true),
       (.unavailable, "unavailable", true),
       (.notFound, "not_found", false),

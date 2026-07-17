@@ -192,6 +192,15 @@ private enum VisionHelper {
     return pdfDocument.pageCount
   }
 
+  private static let outputEncodings: [String: NSBitmapImageRep.FileType] = [
+    "png": .png, "jpg": .jpeg, "jpeg": .jpeg, "tiff": .tiff, "tif": .tiff,
+    "bmp": .bmp, "gif": .gif,
+  ]
+
+  /// Saves the image, encoding according to the output path's extension.
+  /// An existing destination file is intentionally overwritten, but the
+  /// replacement is written to a temp file first and renamed into place so
+  /// the destination is never left partially written.
   static func saveCIImage(_ image: CIImage, to path: String, context: FolderContext?) throws {
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
@@ -199,11 +208,16 @@ private enum VisionHelper {
     }
 
     let url = URL(fileURLWithPath: absolutePath)
+    guard let encoding = outputEncodings[url.pathExtension.lowercased()] else {
+      throw VisionError.invalidArguments(
+        "Unsupported output extension '\(url.pathExtension)'. Supported: \(outputEncodings.keys.sorted().joined(separator: ", "))"
+      )
+    }
     let ciContext = CIContext()
 
     // Create parent directory if needed
     let parentDir = url.deletingLastPathComponent()
-    try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
     // Normalize the image extent to start at origin
     var imageToSave = image
@@ -234,19 +248,21 @@ private enum VisionHelper {
       throw VisionError.saveFailed("Failed to create bitmap")
     }
 
-    let isPNG = url.pathExtension.lowercased() == "png"
-    let data: Data?
-    if isPNG {
-      data = bitmap.representation(using: .png, properties: [:])
-    } else {
-      data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
-    }
-
-    guard let imageData = data else {
+    let properties: [NSBitmapImageRep.PropertyKey: Any] =
+      encoding == .jpeg ? [.compressionFactor: 0.9] : [:]
+    guard let imageData = bitmap.representation(using: encoding, properties: properties) else {
       throw VisionError.saveFailed("Failed to encode image")
     }
 
-    try imageData.write(to: url)
+    let tempURL = parentDir.appendingPathComponent(
+      ".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+    do {
+      try imageData.write(to: tempURL)
+      _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
+    } catch {
+      try? FileManager.default.removeItem(at: tempURL)
+      throw error
+    }
   }
 
   static func denormalizeRect(_ rect: CGRect, imageSize: CGSize) -> [String: Double] {

@@ -99,6 +99,16 @@ private enum VisionHelper {
     return cgImage
   }
 
+  /// Validates optional PDF render parameters shared by the PDF-capable tools.
+  static func validatePDFRenderArgs(page: Int?, dpi: Int?) throws {
+    if let page, page < 1 {
+      throw VisionError.invalidArguments("page must be >= 1")
+    }
+    if let dpi, !(1...600).contains(dpi) {
+      throw VisionError.invalidArguments("dpi must be between 1 and 600")
+    }
+  }
+
   /// Load image from file, with PDF support (renders specific page at given DPI)
   static func loadImageOrPDF(
     from path: String, context: FolderContext?, page: Int = 1, dpi: Int = 300
@@ -149,6 +159,9 @@ private enum VisionHelper {
     let scale = CGFloat(dpi) / 72.0  // PDF points are 72 per inch
     let width = Int(pageRect.width * scale)
     let height = Int(pageRect.height * scale)
+    guard width > 0, height > 0 else {
+      throw VisionError.invalidArguments("PDF page \(page) has an empty media box")
+    }
 
     // Create bitmap context
     guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -332,6 +345,10 @@ private struct DetectTextTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let level = input.recognition_level, level != "accurate", level != "fast" {
+      throw VisionError.invalidArguments("recognition_level must be 'accurate' or 'fast'")
+    }
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -369,6 +386,7 @@ private struct DetectDocumentTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -411,6 +429,7 @@ private struct DetectBarcodesTool: VisionTool {
   ]
 
   func execute(input: Args) throws -> [String: Any] {
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -532,6 +551,18 @@ private struct DetectRectanglesTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_observations, !(1...100).contains(max) {
+      throw VisionError.invalidArguments("max_observations must be between 1 and 100")
+    }
+    if let ratio = input.min_aspect_ratio, !(0.0...1.0).contains(ratio) {
+      throw VisionError.invalidArguments("min_aspect_ratio must be between 0.0 and 1.0")
+    }
+    if let ratio = input.max_aspect_ratio, !(0.0...1.0).contains(ratio) {
+      throw VisionError.invalidArguments("max_aspect_ratio must be between 0.0 and 1.0")
+    }
+    if let confidence = input.min_confidence, !(0.0...1.0).contains(confidence) {
+      throw VisionError.invalidArguments("min_confidence must be between 0.0 and 1.0")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
 
@@ -565,6 +596,9 @@ private struct ClassifyImageTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_results, !(1...1000).contains(max) {
+      throw VisionError.invalidArguments("max_results must be between 1 and 1000")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
 
     let request = VNClassifyImageRequest()
@@ -645,6 +679,9 @@ private struct DetectHandPoseTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_hands, !(1...100).contains(max) {
+      throw VisionError.invalidArguments("max_hands must be between 1 and 100")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
 
@@ -714,6 +751,9 @@ private struct BlurFacesTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let radius = input.blur_radius, !(radius.isFinite && (0.0...1000.0).contains(radius)) {
+      throw VisionError.invalidArguments("blur_radius must be between 0 and 1000")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     var ciImage = CIImage(cgImage: cgImage)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -782,6 +822,13 @@ private struct AutoCropTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let padding = input.padding, !(padding.isFinite && (0.0...1.0).contains(padding)) {
+      throw VisionError.invalidArguments("padding must be between 0.0 and 1.0")
+    }
+    if let ratio = input.aspect_ratio, parseAspectRatio(ratio) == nil {
+      throw VisionError.invalidArguments(
+        "aspect_ratio must be in the form 'W:H' with positive numbers (e.g. '16:9')")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let ciImage = CIImage(cgImage: cgImage)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -845,7 +892,9 @@ private struct AutoCropTool: VisionTool {
 
   private func parseAspectRatio(_ str: String) -> (Double, Double)? {
     let parts = str.split(separator: ":")
-    guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]) else { return nil }
+    guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]),
+      w.isFinite, h.isFinite, w > 0, h > 0
+    else { return nil }
     return (w, h)
   }
 }
@@ -861,6 +910,9 @@ private struct GenerateSaliencyMapTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let type = input.type, type != "attention", type != "objectness" {
+      throw VisionError.invalidArguments("type must be 'attention' or 'objectness'")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
     let saliencyType = input.type ?? "attention"

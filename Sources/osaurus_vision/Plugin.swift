@@ -51,9 +51,33 @@ private enum VisionHelper {
     return "\(workingDir)/\(path)"
   }
 
+  /// Canonicalizes a path by standardizing it and resolving symlinks on the
+  /// deepest existing ancestor, so containment checks hold for paths that do
+  /// not exist yet.
+  static func canonicalizedPath(_ path: String) -> String {
+    var url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
+    var missing: [String] = []
+    let fm = FileManager.default
+    while (try? fm.attributesOfItem(atPath: url.path)) == nil, url.pathComponents.count > 1 {
+      missing.append(url.lastPathComponent)
+      url = url.deletingLastPathComponent()
+    }
+    var resolved = url.resolvingSymlinksInPath()
+    for component in missing.reversed() {
+      resolved.appendPathComponent(component)
+    }
+    return resolved.standardizedFileURL.path
+  }
+
+  static func isContained(_ path: String, in root: String) -> Bool {
+    let p = canonicalizedPath(path)
+    let r = canonicalizedPath(root)
+    return p == r || p.hasPrefix(r.hasSuffix("/") ? r : r + "/")
+  }
+
   static func validatePath(_ absolutePath: String, context: FolderContext?) -> Bool {
     guard let workingDir = context?.working_directory else { return true }
-    return URL(fileURLWithPath: absolutePath).standardized.path.hasPrefix(workingDir)
+    return isContained(absolutePath, in: workingDir)
   }
 
   static func loadImage(from path: String, context: FolderContext?) throws -> CGImage {

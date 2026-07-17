@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import Foundation
+import OsaurusPluginKit
 import PDFKit
 import Vision
 
@@ -12,89 +13,32 @@ private struct FolderContext: Decodable {
 
 // MARK: - Vision Helper
 
-private enum VisionError: Error, LocalizedError {
-  case imageLoadFailed(String)
-  case invalidPath(String)
-  case saveFailed(String)
-  case fileNotFound(String)
-  case invalidArguments(String)
-
-  var errorDescription: String? { message }
-
-  /// Human-readable message embedded in the failure envelope.
-  var message: String {
-    switch self {
-    case .imageLoadFailed(let path): return "Failed to load image: \(path)"
-    case .invalidPath(let path): return "Invalid path: \(path)"
-    case .saveFailed(let path): return "Failed to save image: \(path)"
-    case .fileNotFound(let path): return "File not found: \(path)"
-    case .invalidArguments(let detail): return detail
-    }
-  }
-
-  /// Maps each failure to the canonical host envelope kind.
-  /// - invalid path / bad arguments -> invalid_args
-  /// - missing input file           -> not_found
-  /// - load / Vision / save failure -> execution_error
-  var kind: Envelope.Kind {
-    switch self {
-    case .invalidPath, .invalidArguments: return .invalidArgs
-    case .fileNotFound: return .notFound
-    case .imageLoadFailed, .saveFailed: return .executionError
-    }
-  }
-}
-
 private enum VisionHelper {
   static func resolvePath(_ path: String, context: FolderContext?) -> String {
     guard !path.hasPrefix("/"), let workingDir = context?.working_directory else { return path }
     return "\(workingDir)/\(path)"
   }
 
-  /// Canonicalizes a path by standardizing it and resolving symlinks on the
-  /// deepest existing ancestor, so containment checks hold for paths that do
-  /// not exist yet.
-  static func canonicalizedPath(_ path: String) -> String {
-    var url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
-    var missing: [String] = []
-    let fm = FileManager.default
-    while (try? fm.attributesOfItem(atPath: url.path)) == nil, url.pathComponents.count > 1 {
-      missing.append(url.lastPathComponent)
-      url = url.deletingLastPathComponent()
-    }
-    var resolved = url.resolvingSymlinksInPath()
-    for component in missing.reversed() {
-      resolved.appendPathComponent(component)
-    }
-    return resolved.standardizedFileURL.path
-  }
-
-  static func isContained(_ path: String, in root: String) -> Bool {
-    let p = canonicalizedPath(path)
-    let r = canonicalizedPath(root)
-    return p == r || p.hasPrefix(r.hasSuffix("/") ? r : r + "/")
-  }
-
   static func validatePath(_ absolutePath: String, context: FolderContext?) -> Bool {
     guard let workingDir = context?.working_directory else { return true }
-    return isContained(absolutePath, in: workingDir)
+    return PathSafety.isContained(absolutePath, in: workingDir)
   }
 
   static func loadImage(from path: String, context: FolderContext?) throws -> CGImage {
     guard !path.isEmpty else {
-      throw VisionError.invalidArguments("image_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "image_path must not be empty")
     }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
     guard let nsImage = NSImage(contentsOfFile: absolutePath),
       let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
     else {
-      throw VisionError.imageLoadFailed(absolutePath)
+      throw EnvelopeFailure(.executionError, "Failed to load image: \(absolutePath)")
     }
     return cgImage
   }
@@ -102,10 +46,10 @@ private enum VisionHelper {
   /// Validates optional PDF render parameters shared by the PDF-capable tools.
   static func validatePDFRenderArgs(page: Int?, dpi: Int?) throws {
     if let page, page < 1 {
-      throw VisionError.invalidArguments("page must be >= 1")
+      throw EnvelopeFailure(.invalidArgs, "page must be >= 1")
     }
     if let dpi, !(1...600).contains(dpi) {
-      throw VisionError.invalidArguments("dpi must be between 1 and 600")
+      throw EnvelopeFailure(.invalidArgs, "dpi must be between 1 and 600")
     }
   }
 
@@ -114,14 +58,14 @@ private enum VisionHelper {
     from path: String, context: FolderContext?, page: Int = 1, dpi: Int = 300
   ) throws -> CGImage {
     guard !path.isEmpty else {
-      throw VisionError.invalidArguments("image_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "image_path must not be empty")
     }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
@@ -135,7 +79,7 @@ private enum VisionHelper {
     guard let nsImage = NSImage(contentsOfFile: absolutePath),
       let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
     else {
-      throw VisionError.imageLoadFailed(absolutePath)
+      throw EnvelopeFailure(.executionError, "Failed to load image: \(absolutePath)")
     }
     return cgImage
   }
@@ -143,14 +87,15 @@ private enum VisionHelper {
   /// Load a specific page from a PDF at given DPI
   static func loadPDFPage(from url: URL, page: Int, dpi: Int) throws -> CGImage {
     guard let pdfDocument = PDFDocument(url: url) else {
-      throw VisionError.imageLoadFailed("Failed to load PDF: \(url.path)")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to load PDF: \(url.path)")
     }
 
     let pageIndex = page - 1  // Convert to 0-based index
     guard pageIndex >= 0, pageIndex < pdfDocument.pageCount,
       let pdfPage = pdfDocument.page(at: pageIndex)
     else {
-      throw VisionError.invalidArguments(
+      throw EnvelopeFailure(
+        .invalidArgs,
         "PDF page \(page) not found (document has \(pdfDocument.pageCount) pages)")
     }
 
@@ -160,7 +105,7 @@ private enum VisionHelper {
     let width = Int(pageRect.width * scale)
     let height = Int(pageRect.height * scale)
     guard width > 0, height > 0 else {
-      throw VisionError.invalidArguments("PDF page \(page) has an empty media box")
+      throw EnvelopeFailure(.invalidArgs, "PDF page \(page) has an empty media box")
     }
 
     // Create bitmap context
@@ -175,7 +120,7 @@ private enum VisionHelper {
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
       )
     else {
-      throw VisionError.imageLoadFailed("Failed to create graphics context")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to create graphics context")
     }
 
     // Fill with white background
@@ -187,7 +132,7 @@ private enum VisionHelper {
     pdfPage.draw(with: .mediaBox, to: context)
 
     guard let cgImage = context.makeImage() else {
-      throw VisionError.imageLoadFailed("Failed to render PDF page")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to render PDF page")
     }
 
     return cgImage
@@ -212,17 +157,17 @@ private enum VisionHelper {
 
   /// Saves the image, encoding according to the output path's extension.
   /// An existing destination file is intentionally overwritten, but the
-  /// replacement is written to a temp file first and renamed into place so
-  /// the destination is never left partially written.
+  /// replacement goes through `PathSafety.atomicWrite` (temp file + rename)
+  /// so the destination is never left partially written.
   static func saveCIImage(_ image: CIImage, to path: String, context: FolderContext?) throws {
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
     guard let encoding = outputEncodings[url.pathExtension.lowercased()] else {
-      throw VisionError.invalidArguments(
+      throw EnvelopeFailure(.invalidArgs, 
         "Unsupported output extension '\(url.pathExtension)'. Supported: \(outputEncodings.keys.sorted().joined(separator: ", "))"
       )
     }
@@ -249,7 +194,7 @@ private enum VisionHelper {
 
     // Render to CGImage first (more reliable)
     guard let cgImage = ciContext.createCGImage(imageToSave, from: imageToSave.extent) else {
-      throw VisionError.saveFailed("Failed to render image")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to render image")
     }
 
     let nsImage = NSImage(
@@ -258,24 +203,16 @@ private enum VisionHelper {
     guard let tiffData = nsImage.tiffRepresentation,
       let bitmap = NSBitmapImageRep(data: tiffData)
     else {
-      throw VisionError.saveFailed("Failed to create bitmap")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create bitmap")
     }
 
     let properties: [NSBitmapImageRep.PropertyKey: Any] =
       encoding == .jpeg ? [.compressionFactor: 0.9] : [:]
     guard let imageData = bitmap.representation(using: encoding, properties: properties) else {
-      throw VisionError.saveFailed("Failed to encode image")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to encode image")
     }
 
-    let tempURL = parentDir.appendingPathComponent(
-      ".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
-    do {
-      try imageData.write(to: tempURL)
-      _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
-    } catch {
-      try? FileManager.default.removeItem(at: tempURL)
-      throw error
-    }
+    try PathSafety.atomicWrite(data: imageData, to: absolutePath)
   }
 
   static func denormalizeRect(_ rect: CGRect, imageSize: CGSize) -> [String: Double] {
@@ -322,8 +259,8 @@ extension VisionTool {
     }
     do {
       return VisionHelper.jsonResult(try execute(input: input))
-    } catch let error as VisionError {
-      return Envelope.failure(error.kind, error.message)
+    } catch let failure as EnvelopeFailure {
+      return failure.render()
     } catch {
       return Envelope.failure(.executionError, error.localizedDescription)
     }
@@ -345,8 +282,8 @@ private struct DetectTextTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
-    if let level = input.recognition_level, level != "accurate", level != "fast" {
-      throw VisionError.invalidArguments("recognition_level must be 'accurate' or 'fast'")
+    if let level = input.recognition_level {
+      try ArgValidation.enumValue(level, field: "recognition_level", allowed: ["accurate", "fast"])
     }
     try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
@@ -552,16 +489,16 @@ private struct DetectRectanglesTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     if let max = input.max_observations, !(1...100).contains(max) {
-      throw VisionError.invalidArguments("max_observations must be between 1 and 100")
+      throw EnvelopeFailure(.invalidArgs, "max_observations must be between 1 and 100")
     }
     if let ratio = input.min_aspect_ratio, !(0.0...1.0).contains(ratio) {
-      throw VisionError.invalidArguments("min_aspect_ratio must be between 0.0 and 1.0")
+      throw EnvelopeFailure(.invalidArgs, "min_aspect_ratio must be between 0.0 and 1.0")
     }
     if let ratio = input.max_aspect_ratio, !(0.0...1.0).contains(ratio) {
-      throw VisionError.invalidArguments("max_aspect_ratio must be between 0.0 and 1.0")
+      throw EnvelopeFailure(.invalidArgs, "max_aspect_ratio must be between 0.0 and 1.0")
     }
     if let confidence = input.min_confidence, !(0.0...1.0).contains(confidence) {
-      throw VisionError.invalidArguments("min_confidence must be between 0.0 and 1.0")
+      throw EnvelopeFailure(.invalidArgs, "min_confidence must be between 0.0 and 1.0")
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -597,7 +534,7 @@ private struct ClassifyImageTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     if let max = input.max_results, !(1...1000).contains(max) {
-      throw VisionError.invalidArguments("max_results must be between 1 and 1000")
+      throw EnvelopeFailure(.invalidArgs, "max_results must be between 1 and 1000")
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
 
@@ -680,7 +617,7 @@ private struct DetectHandPoseTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     if let max = input.max_hands, !(1...100).contains(max) {
-      throw VisionError.invalidArguments("max_hands must be between 1 and 100")
+      throw EnvelopeFailure(.invalidArgs, "max_hands must be between 1 and 100")
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -752,7 +689,7 @@ private struct BlurFacesTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     if let radius = input.blur_radius, !(radius.isFinite && (0.0...1000.0).contains(radius)) {
-      throw VisionError.invalidArguments("blur_radius must be between 0 and 1000")
+      throw EnvelopeFailure(.invalidArgs, "blur_radius must be between 0 and 1000")
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     var ciImage = CIImage(cgImage: cgImage)
@@ -773,13 +710,13 @@ private struct BlurFacesTool: VisionTool {
     guard let blurFilter = CIFilter(name: "CIGaussianBlur"),
       let blendFilter = CIFilter(name: "CIBlendWithMask")
     else {
-      throw VisionError.saveFailed("Failed to create filters")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create filters")
     }
 
     blurFilter.setValue(ciImage, forKey: kCIInputImageKey)
     blurFilter.setValue(input.blur_radius ?? 30.0, forKey: kCIInputRadiusKey)
     guard let blurredImage = blurFilter.outputImage else {
-      throw VisionError.saveFailed("Failed to apply blur")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to apply blur")
     }
 
     for face in faces {
@@ -823,10 +760,10 @@ private struct AutoCropTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     if let padding = input.padding, !(padding.isFinite && (0.0...1.0).contains(padding)) {
-      throw VisionError.invalidArguments("padding must be between 0.0 and 1.0")
+      throw EnvelopeFailure(.invalidArgs, "padding must be between 0.0 and 1.0")
     }
     if let ratio = input.aspect_ratio, parseAspectRatio(ratio) == nil {
-      throw VisionError.invalidArguments(
+      throw EnvelopeFailure(.invalidArgs, 
         "aspect_ratio must be in the form 'W:H' with positive numbers (e.g. '16:9')")
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
@@ -910,8 +847,8 @@ private struct GenerateSaliencyMapTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
-    if let type = input.type, type != "attention", type != "objectness" {
-      throw VisionError.invalidArguments("type must be 'attention' or 'objectness'")
+    if let type = input.type {
+      try ArgValidation.enumValue(type, field: "type", allowed: ["attention", "objectness"])
     }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -930,7 +867,7 @@ private struct GenerateSaliencyMapTool: VisionTool {
       : (request as? VNGenerateAttentionBasedSaliencyImageRequest)?.results?.first
 
     guard let obs = observation else {
-      throw VisionError.saveFailed("Failed to generate saliency map")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to generate saliency map")
     }
 
     var saliencyImage = CIImage(cvPixelBuffer: obs.pixelBuffer)
@@ -980,7 +917,7 @@ private struct RemoveBackgroundTool: VisionTool {
     try handler.perform([request])
 
     guard let obs = request.results?.first else {
-      throw VisionError.saveFailed("No foreground detected")
+      throw EnvelopeFailure(.executionError, "Failed to save image: No foreground detected")
     }
 
     let maskPixelBuffer = try obs.generateScaledMaskForImage(
@@ -988,7 +925,7 @@ private struct RemoveBackgroundTool: VisionTool {
     let maskImage = CIImage(cvPixelBuffer: maskPixelBuffer)
 
     guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
-      throw VisionError.saveFailed("Failed to create blend filter")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create blend filter")
     }
 
     let transparentBg = CIImage(color: CIColor.clear).cropped(to: ciImage.extent)
@@ -997,7 +934,7 @@ private struct RemoveBackgroundTool: VisionTool {
     blendFilter.setValue(maskImage, forKey: kCIInputMaskImageKey)
 
     guard let outputImage = blendFilter.outputImage else {
-      throw VisionError.saveFailed("Failed to apply mask")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to apply mask")
     }
 
     var outputPath = input.output_path
@@ -1027,24 +964,24 @@ private struct GetPDFInfoTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     guard !input.pdf_path.isEmpty else {
-      throw VisionError.invalidArguments("pdf_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "pdf_path must not be empty")
     }
     let absolutePath = VisionHelper.resolvePath(input.pdf_path, context: input._context)
     guard VisionHelper.validatePath(absolutePath, context: input._context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
     guard url.pathExtension.lowercased() == "pdf" else {
-      throw VisionError.invalidArguments("File is not a PDF: \(input.pdf_path)")
+      throw EnvelopeFailure(.invalidArgs, "File is not a PDF: \(input.pdf_path)")
     }
 
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
 
     guard let pdfDocument = PDFDocument(url: url) else {
-      throw VisionError.imageLoadFailed("Failed to load PDF: \(input.pdf_path)")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to load PDF: \(input.pdf_path)")
     }
 
     var result: [String: Any] = [

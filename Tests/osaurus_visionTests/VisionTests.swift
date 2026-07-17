@@ -1,4 +1,5 @@
 import Foundation
+import OsaurusPluginKit
 import Testing
 
 @testable import osaurus_vision
@@ -59,7 +60,8 @@ struct EnvelopeTests {
     let cases: [(Envelope.Kind, String, Bool)] = [
       (.invalidArgs, "invalid_args", false),
       (.executionError, "execution_error", true),
-      (.unavailable, "unavailable", true),
+      (.permissionDenied, "permission_denied", false),
+      (.timeout, "timeout", true),
       (.notFound, "not_found", false),
     ]
 
@@ -86,9 +88,9 @@ struct EnvelopeTests {
     #expect(envelope["message"] as? String == tricky)
   }
 
-  @Test("successRaw wraps a payload without altering it")
+  @Test("success(raw:) wraps a payload without altering it")
   func testSuccessRaw() throws {
-    let envelope = try parse(Envelope.successRaw("{\"value\":42}"))
+    let envelope = try parse(Envelope.success(raw: "{\"value\":42}"))
     #expect(envelope["ok"] as? Bool == true)
     let result = try #require(envelope["result"] as? [String: Any])
     #expect(result["value"] as? Int == 42)

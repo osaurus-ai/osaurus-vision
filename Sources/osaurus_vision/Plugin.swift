@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import Foundation
+import OsaurusPluginABI
 import OsaurusPluginKit
 import PDFKit
 import Vision
@@ -1053,27 +1054,6 @@ private class PluginContext {
   }
 }
 
-// MARK: - C ABI
-
-private typealias osr_plugin_ctx_t = UnsafeMutableRawPointer
-
-private struct osr_plugin_api {
-  var free_string: (@convention(c) (UnsafePointer<CChar>?) -> Void)?
-  var `init`: (@convention(c) () -> osr_plugin_ctx_t?)?
-  var destroy: (@convention(c) (osr_plugin_ctx_t?) -> Void)?
-  var get_manifest: (@convention(c) (osr_plugin_ctx_t?) -> UnsafePointer<CChar>?)?
-  var invoke:
-    (
-      @convention(c) (
-        osr_plugin_ctx_t?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?
-      ) -> UnsafePointer<CChar>?
-    )?
-}
-
-private func makeCString(_ s: String) -> UnsafePointer<CChar>? {
-  strdup(s).map { UnsafePointer($0) }
-}
-
 // MARK: - Manifest
 
 /// File-scope manifest JSON embedded in the dylib and returned by `get_manifest`.
@@ -1311,25 +1291,13 @@ let visionManifestJSON = """
 
 // MARK: - API Implementation
 
-nonisolated(unsafe) private var api: osr_plugin_api = {
-  var api = osr_plugin_api()
-
-  api.free_string = { ptr in
-    if let p = ptr { free(UnsafeMutableRawPointer(mutating: p)) }
-  }
-
-  api.`init` = {
-    Unmanaged.passRetained(PluginContext()).toOpaque()
-  }
-
-  api.destroy = { ctxPtr in
-    guard let ctxPtr else { return }
-    Unmanaged<PluginContext>.fromOpaque(ctxPtr).release()
-  }
-
-  api.get_manifest = { _ in makeCString(visionManifestJSON) }
-
-  api.invoke = { ctxPtr, typePtr, idPtr, payloadPtr in
+/// Stable storage for the plugin API table (the host keeps the pointer).
+nonisolated(unsafe) private var api = PluginEntry.makeAPI(
+  version: OsrABIVersion.v2,
+  init: { Unmanaged.passRetained(PluginContext()).toOpaque() },
+  destroy: { ctxPtr in ctxPtr.map { Unmanaged<PluginContext>.fromOpaque($0).release() } },
+  getManifest: { _ in osrMakeCString(visionManifestJSON) },
+  invoke: { ctxPtr, typePtr, idPtr, payloadPtr in
     guard let ctxPtr, let typePtr, let idPtr, let payloadPtr else { return nil }
 
     let ctx = Unmanaged<PluginContext>.fromOpaque(ctxPtr).takeUnretainedValue()
@@ -1338,16 +1306,19 @@ nonisolated(unsafe) private var api: osr_plugin_api = {
     let payload = String(cString: payloadPtr)
 
     guard type == "tool" else {
-      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type: \(type)"))
+      return osrMakeCString(Envelope.failure(.invalidArgs, "Unknown capability type: \(type)"))
     }
 
-    return makeCString(ctx.invoke(toolId: id, payload: payload))
+    return osrMakeCString(ctx.invoke(toolId: id, payload: payload))
   }
+)
 
-  return api
-}()
+@_cdecl("osaurus_plugin_entry_v2")
+public func osaurus_plugin_entry_v2(_ host: UnsafeRawPointer?) -> UnsafeRawPointer? {
+  PluginEntry.enterV2(host, api: &api)
+}
 
 @_cdecl("osaurus_plugin_entry")
 public func osaurus_plugin_entry() -> UnsafeRawPointer? {
-  UnsafeRawPointer(&api)
+  PluginEntry.enterV1(api: &api)
 }

@@ -13,4 +13,5 @@ jobs:
       - name: Build
         run: swift build -c release
       - name: Test
-        run: swift test
+        timeout-minutes: 10
+        run: swift test --parallel

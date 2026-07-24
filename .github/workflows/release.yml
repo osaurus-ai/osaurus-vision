@@ -16,7 +16,7 @@ jobs:
 
   release:
     needs: test
-    uses: osaurus-ai/osaurus-tools/.github/workflows/build-plugin.yml@209f84e542b5fa7d5762c110229c9a6cd755babc
+    uses: osaurus-ai/osaurus-tools/.github/workflows/build-plugin.yml@015ade6cda1840d81929f0080fc5d8c1371bfe16
     permissions:
       contents: write
     secrets: inherit

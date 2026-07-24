@@ -54,7 +54,9 @@ struct PathContainmentTests {
     #expect(result["kind"] as? String == "invalid_args")
   }
 
-  @Test("Symlink escape is rejected for output paths too")
+  // blur_faces runs face detection before output-path validation, so this
+  // reaches Vision and must be gated on CI.
+  @Test("Symlink escape is rejected for output paths too", VisionRuntime.required)
   func testSymlinkEscapeOnOutputPath() throws {
     try TestImageGenerator.setup()
     let base = TestImageGenerator.tempDir.appendingPathComponent("symout-\(UUID().uuidString)")
@@ -80,7 +82,7 @@ struct PathContainmentTests {
     #expect(!FileManager.default.fileExists(atPath: outsideDir.appendingPathComponent("out.png").path))
   }
 
-  @Test("Relative path inside the working directory still works")
+  @Test("Relative path inside the working directory still works", VisionRuntime.required)
   func testContainedPathAccepted() throws {
     try TestImageGenerator.setup()
     let base = TestImageGenerator.tempDir.appendingPathComponent("inside-\(UUID().uuidString)")
@@ -131,6 +133,12 @@ struct ParameterBoundsTests {
         args: ["image_path": pdf.path, "dpi": dpi])
       expectInvalidArgs(result)
     }
+  }
+
+  @Test("Maximum allowed PDF dpi is accepted", VisionRuntime.required)
+  func testDPIMaxAccepted() throws {
+    try TestImageGenerator.setup()
+    let pdf = try TestImageGenerator.createTextPDF(text: "DPI bounds")
 
     let ok = PluginInvoker.shared.invoke(
       tool: "detect_text",
@@ -231,7 +239,9 @@ struct ParameterBoundsTests {
   }
 }
 
-@Suite("Output Encoding Tests", .serialized)
+// Every test here invokes blur_faces on a valid input image, which runs
+// Vision face detection before any output handling — gate the whole suite.
+@Suite("Output Encoding Tests", .serialized, VisionRuntime.required)
 struct OutputEncodingTests {
 
   private func magicBytes(_ path: String, count: Int) throws -> [UInt8] {

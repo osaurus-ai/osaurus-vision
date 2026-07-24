@@ -380,7 +380,7 @@ struct VisionPluginTests {
   }
 }
 
-@Suite("Text Detection Tests", .serialized)
+@Suite("Text Detection Tests", .serialized, VisionRuntime.required)
 struct TextDetectionTests {
 
   @Test("Detect text in image with text")
@@ -425,7 +425,7 @@ struct TextDetectionTests {
   }
 }
 
-@Suite("PDF Support Tests", .serialized)
+@Suite("PDF Support Tests", .serialized, VisionRuntime.required)
 struct PDFSupportTests {
 
   @Test("Detect text in PDF")
@@ -544,7 +544,7 @@ struct PDFSupportTests {
   }
 }
 
-@Suite("Document Detection Tests", .serialized)
+@Suite("Document Detection Tests", .serialized, VisionRuntime.required)
 struct DocumentDetectionTests {
 
   @Test("Detect document boundaries")
@@ -567,7 +567,7 @@ struct DocumentDetectionTests {
   }
 }
 
-@Suite("Barcode Detection Tests", .serialized)
+@Suite("Barcode Detection Tests", .serialized, VisionRuntime.required)
 struct BarcodeDetectionTests {
 
   @Test("Detect barcodes returns empty for non-barcode image")
@@ -609,7 +609,7 @@ struct BarcodeDetectionTests {
   }
 }
 
-@Suite("Face Detection Tests", .serialized)
+@Suite("Face Detection Tests", .serialized, VisionRuntime.required)
 struct FaceDetectionTests {
 
   @Test("Detect faces in image")
@@ -651,7 +651,7 @@ struct FaceDetectionTests {
   }
 }
 
-@Suite("Rectangle Detection Tests", .serialized)
+@Suite("Rectangle Detection Tests", .serialized, VisionRuntime.required)
 struct RectangleDetectionTests {
 
   @Test("Detect rectangles in image")
@@ -696,7 +696,7 @@ struct RectangleDetectionTests {
   }
 }
 
-@Suite("Image Classification Tests", .serialized)
+@Suite("Image Classification Tests", .serialized, VisionRuntime.required)
 struct ImageClassificationTests {
 
   @Test("Classify image")
@@ -741,7 +741,7 @@ struct ImageClassificationTests {
   }
 }
 
-@Suite("Horizon Detection Tests", .serialized)
+@Suite("Horizon Detection Tests", .serialized, VisionRuntime.required)
 struct HorizonDetectionTests {
 
   @Test("Detect horizon")
@@ -763,7 +763,7 @@ struct HorizonDetectionTests {
   }
 }
 
-@Suite("Body Pose Detection Tests", .serialized)
+@Suite("Body Pose Detection Tests", .serialized, VisionRuntime.required)
 struct BodyPoseDetectionTests {
 
   @Test("Detect body pose")
@@ -787,7 +787,7 @@ struct BodyPoseDetectionTests {
   }
 }
 
-@Suite("Hand Pose Detection Tests", .serialized)
+@Suite("Hand Pose Detection Tests", .serialized, VisionRuntime.required)
 struct HandPoseDetectionTests {
 
   @Test("Detect hand pose")
@@ -829,7 +829,7 @@ struct HandPoseDetectionTests {
   }
 }
 
-@Suite("Animal Detection Tests", .serialized)
+@Suite("Animal Detection Tests", .serialized, VisionRuntime.required)
 struct AnimalDetectionTests {
 
   @Test("Detect animals returns empty for non-animal image")
@@ -853,7 +853,7 @@ struct AnimalDetectionTests {
   }
 }
 
-@Suite("Blur Faces Tests", .serialized)
+@Suite("Blur Faces Tests", .serialized, VisionRuntime.required)
 struct BlurFacesTests {
 
   @Test("Blur faces in image")
@@ -899,7 +899,7 @@ struct BlurFacesTests {
   }
 }
 
-@Suite("Auto Crop Tests", .serialized)
+@Suite("Auto Crop Tests", .serialized, VisionRuntime.required)
 struct AutoCropTests {
 
   @Test("Auto crop image")
@@ -946,7 +946,7 @@ struct AutoCropTests {
   }
 }
 
-@Suite("Saliency Map Tests", .serialized)
+@Suite("Saliency Map Tests", .serialized, VisionRuntime.required)
 struct SaliencyMapTests {
 
   @Test("Generate attention saliency map")
@@ -997,7 +997,7 @@ struct SaliencyMapTests {
   }
 }
 
-@Suite("Remove Background Tests", .serialized)
+@Suite("Remove Background Tests", .serialized, VisionRuntime.required)
 struct RemoveBackgroundTests {
 
   @Test("Remove background from image")

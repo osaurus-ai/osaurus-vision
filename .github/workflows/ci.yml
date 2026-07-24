@@ -12,12 +12,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build -c release
-      - name: List tests (discovery only)
-        timeout-minutes: 5
-        run: swift test list
-      - name: Conformance tests (no Vision framework calls)
-        timeout-minutes: 5
-        run: swift test --filter SDKConformanceTests
-      - name: Full suite
-        timeout-minutes: 10
+      # Vision/CoreML analysis hangs on virtualized runners (no GPU/ANE), so
+      # suites that reach VNImageRequestHandler.perform are skipped when CI is
+      # set (see Tests/osaurus_visionTests/VisionRuntimeGate.swift). Run the
+      # full suite locally before tagging a release.
+      - name: Test
+        timeout-minutes: 15
         run: swift test --parallel

@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      # Vision/CoreML analysis hangs on virtualized runners (no GPU/ANE), so
+      # suites that reach VNImageRequestHandler.perform are skipped when CI is
+      # set (see Tests/osaurus_visionTests/VisionRuntimeGate.swift). Run the
+      # full suite locally before tagging a release.
+      - name: Test
+        timeout-minutes: 15
+        run: swift test --parallel

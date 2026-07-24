@@ -1,6 +1,8 @@
 import AppKit
 import CoreImage
 import Foundation
+import OsaurusPluginABI
+import OsaurusPluginKit
 import PDFKit
 import Vision
 
@@ -12,39 +14,6 @@ private struct FolderContext: Decodable {
 
 // MARK: - Vision Helper
 
-private enum VisionError: Error, LocalizedError {
-  case imageLoadFailed(String)
-  case invalidPath(String)
-  case saveFailed(String)
-  case fileNotFound(String)
-  case invalidArguments(String)
-
-  var errorDescription: String? { message }
-
-  /// Human-readable message embedded in the failure envelope.
-  var message: String {
-    switch self {
-    case .imageLoadFailed(let path): return "Failed to load image: \(path)"
-    case .invalidPath(let path): return "Invalid path: \(path)"
-    case .saveFailed(let path): return "Failed to save image: \(path)"
-    case .fileNotFound(let path): return "File not found: \(path)"
-    case .invalidArguments(let detail): return detail
-    }
-  }
-
-  /// Maps each failure to the canonical host envelope kind.
-  /// - invalid path / bad arguments -> invalid_args
-  /// - missing input file           -> not_found
-  /// - load / Vision / save failure -> execution_error
-  var kind: Envelope.Kind {
-    switch self {
-    case .invalidPath, .invalidArguments: return .invalidArgs
-    case .fileNotFound: return .notFound
-    case .imageLoadFailed, .saveFailed: return .executionError
-    }
-  }
-}
-
 private enum VisionHelper {
   static func resolvePath(_ path: String, context: FolderContext?) -> String {
     guard !path.hasPrefix("/"), let workingDir = context?.working_directory else { return path }
@@ -53,26 +22,36 @@ private enum VisionHelper {
 
   static func validatePath(_ absolutePath: String, context: FolderContext?) -> Bool {
     guard let workingDir = context?.working_directory else { return true }
-    return URL(fileURLWithPath: absolutePath).standardized.path.hasPrefix(workingDir)
+    return PathSafety.isContained(absolutePath, in: workingDir)
   }
 
   static func loadImage(from path: String, context: FolderContext?) throws -> CGImage {
     guard !path.isEmpty else {
-      throw VisionError.invalidArguments("image_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "image_path must not be empty")
     }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
     guard let nsImage = NSImage(contentsOfFile: absolutePath),
       let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
     else {
-      throw VisionError.imageLoadFailed(absolutePath)
+      throw EnvelopeFailure(.executionError, "Failed to load image: \(absolutePath)")
     }
     return cgImage
+  }
+
+  /// Validates optional PDF render parameters shared by the PDF-capable tools.
+  static func validatePDFRenderArgs(page: Int?, dpi: Int?) throws {
+    if let page, page < 1 {
+      throw EnvelopeFailure(.invalidArgs, "page must be >= 1")
+    }
+    if let dpi, !(1...600).contains(dpi) {
+      throw EnvelopeFailure(.invalidArgs, "dpi must be between 1 and 600")
+    }
   }
 
   /// Load image from file, with PDF support (renders specific page at given DPI)
@@ -80,14 +59,14 @@ private enum VisionHelper {
     from path: String, context: FolderContext?, page: Int = 1, dpi: Int = 300
   ) throws -> CGImage {
     guard !path.isEmpty else {
-      throw VisionError.invalidArguments("image_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "image_path must not be empty")
     }
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
@@ -101,7 +80,7 @@ private enum VisionHelper {
     guard let nsImage = NSImage(contentsOfFile: absolutePath),
       let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
     else {
-      throw VisionError.imageLoadFailed(absolutePath)
+      throw EnvelopeFailure(.executionError, "Failed to load image: \(absolutePath)")
     }
     return cgImage
   }
@@ -109,14 +88,15 @@ private enum VisionHelper {
   /// Load a specific page from a PDF at given DPI
   static func loadPDFPage(from url: URL, page: Int, dpi: Int) throws -> CGImage {
     guard let pdfDocument = PDFDocument(url: url) else {
-      throw VisionError.imageLoadFailed("Failed to load PDF: \(url.path)")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to load PDF: \(url.path)")
     }
 
     let pageIndex = page - 1  // Convert to 0-based index
     guard pageIndex >= 0, pageIndex < pdfDocument.pageCount,
       let pdfPage = pdfDocument.page(at: pageIndex)
     else {
-      throw VisionError.invalidArguments(
+      throw EnvelopeFailure(
+        .invalidArgs,
         "PDF page \(page) not found (document has \(pdfDocument.pageCount) pages)")
     }
 
@@ -125,6 +105,9 @@ private enum VisionHelper {
     let scale = CGFloat(dpi) / 72.0  // PDF points are 72 per inch
     let width = Int(pageRect.width * scale)
     let height = Int(pageRect.height * scale)
+    guard width > 0, height > 0 else {
+      throw EnvelopeFailure(.invalidArgs, "PDF page \(page) has an empty media box")
+    }
 
     // Create bitmap context
     guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
@@ -138,7 +121,7 @@ private enum VisionHelper {
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
       )
     else {
-      throw VisionError.imageLoadFailed("Failed to create graphics context")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to create graphics context")
     }
 
     // Fill with white background
@@ -150,7 +133,7 @@ private enum VisionHelper {
     pdfPage.draw(with: .mediaBox, to: context)
 
     guard let cgImage = context.makeImage() else {
-      throw VisionError.imageLoadFailed("Failed to render PDF page")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to render PDF page")
     }
 
     return cgImage
@@ -168,18 +151,32 @@ private enum VisionHelper {
     return pdfDocument.pageCount
   }
 
+  private static let outputEncodings: [String: NSBitmapImageRep.FileType] = [
+    "png": .png, "jpg": .jpeg, "jpeg": .jpeg, "tiff": .tiff, "tif": .tiff,
+    "bmp": .bmp, "gif": .gif,
+  ]
+
+  /// Saves the image, encoding according to the output path's extension.
+  /// An existing destination file is intentionally overwritten, but the
+  /// replacement goes through `PathSafety.atomicWrite` (temp file + rename)
+  /// so the destination is never left partially written.
   static func saveCIImage(_ image: CIImage, to path: String, context: FolderContext?) throws {
     let absolutePath = resolvePath(path, context: context)
     guard validatePath(absolutePath, context: context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
+    guard let encoding = outputEncodings[url.pathExtension.lowercased()] else {
+      throw EnvelopeFailure(.invalidArgs, 
+        "Unsupported output extension '\(url.pathExtension)'. Supported: \(outputEncodings.keys.sorted().joined(separator: ", "))"
+      )
+    }
     let ciContext = CIContext()
 
     // Create parent directory if needed
     let parentDir = url.deletingLastPathComponent()
-    try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
     // Normalize the image extent to start at origin
     var imageToSave = image
@@ -198,7 +195,7 @@ private enum VisionHelper {
 
     // Render to CGImage first (more reliable)
     guard let cgImage = ciContext.createCGImage(imageToSave, from: imageToSave.extent) else {
-      throw VisionError.saveFailed("Failed to render image")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to render image")
     }
 
     let nsImage = NSImage(
@@ -207,22 +204,16 @@ private enum VisionHelper {
     guard let tiffData = nsImage.tiffRepresentation,
       let bitmap = NSBitmapImageRep(data: tiffData)
     else {
-      throw VisionError.saveFailed("Failed to create bitmap")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create bitmap")
     }
 
-    let isPNG = url.pathExtension.lowercased() == "png"
-    let data: Data?
-    if isPNG {
-      data = bitmap.representation(using: .png, properties: [:])
-    } else {
-      data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
+    let properties: [NSBitmapImageRep.PropertyKey: Any] =
+      encoding == .jpeg ? [.compressionFactor: 0.9] : [:]
+    guard let imageData = bitmap.representation(using: encoding, properties: properties) else {
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to encode image")
     }
 
-    guard let imageData = data else {
-      throw VisionError.saveFailed("Failed to encode image")
-    }
-
-    try imageData.write(to: url)
+    try PathSafety.atomicWrite(data: imageData, to: absolutePath)
   }
 
   static func denormalizeRect(_ rect: CGRect, imageSize: CGSize) -> [String: Double] {
@@ -269,8 +260,8 @@ extension VisionTool {
     }
     do {
       return VisionHelper.jsonResult(try execute(input: input))
-    } catch let error as VisionError {
-      return Envelope.failure(error.kind, error.message)
+    } catch let failure as EnvelopeFailure {
+      return failure.render()
     } catch {
       return Envelope.failure(.executionError, error.localizedDescription)
     }
@@ -292,6 +283,10 @@ private struct DetectTextTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let level = input.recognition_level {
+      try ArgValidation.enumValue(level, field: "recognition_level", allowed: ["accurate", "fast"])
+    }
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -329,6 +324,7 @@ private struct DetectDocumentTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -371,6 +367,7 @@ private struct DetectBarcodesTool: VisionTool {
   ]
 
   func execute(input: Args) throws -> [String: Any] {
+    try VisionHelper.validatePDFRenderArgs(page: input.page, dpi: input.dpi)
     let cgImage = try VisionHelper.loadImageOrPDF(
       from: input.image_path,
       context: input._context,
@@ -492,6 +489,18 @@ private struct DetectRectanglesTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_observations, !(1...100).contains(max) {
+      throw EnvelopeFailure(.invalidArgs, "max_observations must be between 1 and 100")
+    }
+    if let ratio = input.min_aspect_ratio, !(0.0...1.0).contains(ratio) {
+      throw EnvelopeFailure(.invalidArgs, "min_aspect_ratio must be between 0.0 and 1.0")
+    }
+    if let ratio = input.max_aspect_ratio, !(0.0...1.0).contains(ratio) {
+      throw EnvelopeFailure(.invalidArgs, "max_aspect_ratio must be between 0.0 and 1.0")
+    }
+    if let confidence = input.min_confidence, !(0.0...1.0).contains(confidence) {
+      throw EnvelopeFailure(.invalidArgs, "min_confidence must be between 0.0 and 1.0")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
 
@@ -525,6 +534,9 @@ private struct ClassifyImageTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_results, !(1...1000).contains(max) {
+      throw EnvelopeFailure(.invalidArgs, "max_results must be between 1 and 1000")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
 
     let request = VNClassifyImageRequest()
@@ -605,6 +617,9 @@ private struct DetectHandPoseTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let max = input.max_hands, !(1...100).contains(max) {
+      throw EnvelopeFailure(.invalidArgs, "max_hands must be between 1 and 100")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
 
@@ -674,6 +689,9 @@ private struct BlurFacesTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let radius = input.blur_radius, !(radius.isFinite && (0.0...1000.0).contains(radius)) {
+      throw EnvelopeFailure(.invalidArgs, "blur_radius must be between 0 and 1000")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     var ciImage = CIImage(cgImage: cgImage)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -693,13 +711,13 @@ private struct BlurFacesTool: VisionTool {
     guard let blurFilter = CIFilter(name: "CIGaussianBlur"),
       let blendFilter = CIFilter(name: "CIBlendWithMask")
     else {
-      throw VisionError.saveFailed("Failed to create filters")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create filters")
     }
 
     blurFilter.setValue(ciImage, forKey: kCIInputImageKey)
     blurFilter.setValue(input.blur_radius ?? 30.0, forKey: kCIInputRadiusKey)
     guard let blurredImage = blurFilter.outputImage else {
-      throw VisionError.saveFailed("Failed to apply blur")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to apply blur")
     }
 
     for face in faces {
@@ -742,6 +760,13 @@ private struct AutoCropTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let padding = input.padding, !(padding.isFinite && (0.0...1.0).contains(padding)) {
+      throw EnvelopeFailure(.invalidArgs, "padding must be between 0.0 and 1.0")
+    }
+    if let ratio = input.aspect_ratio, parseAspectRatio(ratio) == nil {
+      throw EnvelopeFailure(.invalidArgs, 
+        "aspect_ratio must be in the form 'W:H' with positive numbers (e.g. '16:9')")
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let ciImage = CIImage(cgImage: cgImage)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -805,7 +830,9 @@ private struct AutoCropTool: VisionTool {
 
   private func parseAspectRatio(_ str: String) -> (Double, Double)? {
     let parts = str.split(separator: ":")
-    guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]) else { return nil }
+    guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]),
+      w.isFinite, h.isFinite, w > 0, h > 0
+    else { return nil }
     return (w, h)
   }
 }
@@ -821,6 +848,9 @@ private struct GenerateSaliencyMapTool: VisionTool {
   }
 
   func execute(input: Args) throws -> [String: Any] {
+    if let type = input.type {
+      try ArgValidation.enumValue(type, field: "type", allowed: ["attention", "objectness"])
+    }
     let cgImage = try VisionHelper.loadImage(from: input.image_path, context: input._context)
     let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
     let saliencyType = input.type ?? "attention"
@@ -838,7 +868,7 @@ private struct GenerateSaliencyMapTool: VisionTool {
       : (request as? VNGenerateAttentionBasedSaliencyImageRequest)?.results?.first
 
     guard let obs = observation else {
-      throw VisionError.saveFailed("Failed to generate saliency map")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to generate saliency map")
     }
 
     var saliencyImage = CIImage(cvPixelBuffer: obs.pixelBuffer)
@@ -888,7 +918,7 @@ private struct RemoveBackgroundTool: VisionTool {
     try handler.perform([request])
 
     guard let obs = request.results?.first else {
-      throw VisionError.saveFailed("No foreground detected")
+      throw EnvelopeFailure(.executionError, "Failed to save image: No foreground detected")
     }
 
     let maskPixelBuffer = try obs.generateScaledMaskForImage(
@@ -896,7 +926,7 @@ private struct RemoveBackgroundTool: VisionTool {
     let maskImage = CIImage(cvPixelBuffer: maskPixelBuffer)
 
     guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
-      throw VisionError.saveFailed("Failed to create blend filter")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to create blend filter")
     }
 
     let transparentBg = CIImage(color: CIColor.clear).cropped(to: ciImage.extent)
@@ -905,7 +935,7 @@ private struct RemoveBackgroundTool: VisionTool {
     blendFilter.setValue(maskImage, forKey: kCIInputMaskImageKey)
 
     guard let outputImage = blendFilter.outputImage else {
-      throw VisionError.saveFailed("Failed to apply mask")
+      throw EnvelopeFailure(.executionError, "Failed to save image: Failed to apply mask")
     }
 
     var outputPath = input.output_path
@@ -935,24 +965,24 @@ private struct GetPDFInfoTool: VisionTool {
 
   func execute(input: Args) throws -> [String: Any] {
     guard !input.pdf_path.isEmpty else {
-      throw VisionError.invalidArguments("pdf_path must not be empty")
+      throw EnvelopeFailure(.invalidArgs, "pdf_path must not be empty")
     }
     let absolutePath = VisionHelper.resolvePath(input.pdf_path, context: input._context)
     guard VisionHelper.validatePath(absolutePath, context: input._context) else {
-      throw VisionError.invalidPath("Path outside working directory")
+      throw EnvelopeFailure(.invalidArgs, "Invalid path: Path outside working directory")
     }
 
     let url = URL(fileURLWithPath: absolutePath)
     guard url.pathExtension.lowercased() == "pdf" else {
-      throw VisionError.invalidArguments("File is not a PDF: \(input.pdf_path)")
+      throw EnvelopeFailure(.invalidArgs, "File is not a PDF: \(input.pdf_path)")
     }
 
     guard FileManager.default.fileExists(atPath: absolutePath) else {
-      throw VisionError.fileNotFound(absolutePath)
+      throw EnvelopeFailure(.notFound, "File not found: \(absolutePath)")
     }
 
     guard let pdfDocument = PDFDocument(url: url) else {
-      throw VisionError.imageLoadFailed("Failed to load PDF: \(input.pdf_path)")
+      throw EnvelopeFailure(.executionError, "Failed to load image: Failed to load PDF: \(input.pdf_path)")
     }
 
     var result: [String: Any] = [
@@ -1024,27 +1054,6 @@ private class PluginContext {
   }
 }
 
-// MARK: - C ABI
-
-private typealias osr_plugin_ctx_t = UnsafeMutableRawPointer
-
-private struct osr_plugin_api {
-  var free_string: (@convention(c) (UnsafePointer<CChar>?) -> Void)?
-  var `init`: (@convention(c) () -> osr_plugin_ctx_t?)?
-  var destroy: (@convention(c) (osr_plugin_ctx_t?) -> Void)?
-  var get_manifest: (@convention(c) (osr_plugin_ctx_t?) -> UnsafePointer<CChar>?)?
-  var invoke:
-    (
-      @convention(c) (
-        osr_plugin_ctx_t?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?
-      ) -> UnsafePointer<CChar>?
-    )?
-}
-
-private func makeCString(_ s: String) -> UnsafePointer<CChar>? {
-  strdup(s).map { UnsafePointer($0) }
-}
-
 // MARK: - Manifest
 
 /// File-scope manifest JSON embedded in the dylib and returned by `get_manifest`.
@@ -1054,7 +1063,7 @@ let visionManifestJSON = """
   {
     "plugin_id": "osaurus.vision",
     "name": "Vision",
-    "version": "0.1.0",
+    "version": "1.0.2",
     "description": "macOS Vision framework integration for image analysis, text detection, face detection, background removal, and more",
     "license": "MIT",
     "authors": [],
@@ -1282,25 +1291,13 @@ let visionManifestJSON = """
 
 // MARK: - API Implementation
 
-nonisolated(unsafe) private var api: osr_plugin_api = {
-  var api = osr_plugin_api()
-
-  api.free_string = { ptr in
-    if let p = ptr { free(UnsafeMutableRawPointer(mutating: p)) }
-  }
-
-  api.`init` = {
-    Unmanaged.passRetained(PluginContext()).toOpaque()
-  }
-
-  api.destroy = { ctxPtr in
-    guard let ctxPtr else { return }
-    Unmanaged<PluginContext>.fromOpaque(ctxPtr).release()
-  }
-
-  api.get_manifest = { _ in makeCString(visionManifestJSON) }
-
-  api.invoke = { ctxPtr, typePtr, idPtr, payloadPtr in
+/// Stable storage for the plugin API table (the host keeps the pointer).
+nonisolated(unsafe) private var api = PluginEntry.makeAPI(
+  version: OsrABIVersion.v2,
+  init: { Unmanaged.passRetained(PluginContext()).toOpaque() },
+  destroy: { ctxPtr in ctxPtr.map { Unmanaged<PluginContext>.fromOpaque($0).release() } },
+  getManifest: { _ in osrMakeCString(visionManifestJSON) },
+  invoke: { ctxPtr, typePtr, idPtr, payloadPtr in
     guard let ctxPtr, let typePtr, let idPtr, let payloadPtr else { return nil }
 
     let ctx = Unmanaged<PluginContext>.fromOpaque(ctxPtr).takeUnretainedValue()
@@ -1309,16 +1306,19 @@ nonisolated(unsafe) private var api: osr_plugin_api = {
     let payload = String(cString: payloadPtr)
 
     guard type == "tool" else {
-      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type: \(type)"))
+      return osrMakeCString(Envelope.failure(.invalidArgs, "Unknown capability type: \(type)"))
     }
 
-    return makeCString(ctx.invoke(toolId: id, payload: payload))
+    return osrMakeCString(ctx.invoke(toolId: id, payload: payload))
   }
+)
 
-  return api
-}()
+@_cdecl("osaurus_plugin_entry_v2")
+public func osaurus_plugin_entry_v2(_ host: UnsafeRawPointer?) -> UnsafeRawPointer? {
+  PluginEntry.enterV2(host, api: &api)
+}
 
 @_cdecl("osaurus_plugin_entry")
 public func osaurus_plugin_entry() -> UnsafeRawPointer? {
-  UnsafeRawPointer(&api)
+  PluginEntry.enterV1(api: &api)
 }

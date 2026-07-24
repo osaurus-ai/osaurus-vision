@@ -7,8 +7,16 @@ on:
       - '[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test
+
   release:
-    uses: osaurus-ai/osaurus-tools/.github/workflows/build-plugin.yml@master
+    needs: test
+    uses: osaurus-ai/osaurus-tools/.github/workflows/build-plugin.yml@209f84e542b5fa7d5762c110229c9a6cd755babc
     permissions:
       contents: write
     secrets: inherit

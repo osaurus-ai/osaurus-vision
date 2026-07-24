@@ -367,7 +367,7 @@ struct VisionPluginTests {
 
     #expect(manifest["plugin_id"] as? String == "osaurus.vision")
     #expect(manifest["name"] as? String == "Vision")
-    #expect(manifest["version"] as? String == "1.0.2")
+    #expect(manifest["version"] as? String == "1.1.0")
 
     let capabilities = manifest["capabilities"] as! [String: Any]
     let tools = capabilities["tools"] as! [[String: Any]]

@@ -1063,7 +1063,7 @@ let visionManifestJSON = """
   {
     "plugin_id": "osaurus.vision",
     "name": "Vision",
-    "version": "1.0.2",
+    "version": "1.1.0",
     "description": "macOS Vision framework integration for image analysis, text detection, face detection, background removal, and more",
     "license": "MIT",
     "authors": [],

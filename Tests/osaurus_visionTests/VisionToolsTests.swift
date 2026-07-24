@@ -311,7 +311,18 @@ final class PluginInvoker: @unchecked Sendable {
   }
 
   private static func findDylib() -> String {
-    // Try multiple possible locations
+    let fm = FileManager.default
+
+    // The dylib is built into the same products directory as this test
+    // bundle, regardless of the SwiftPM scratch path (--scratch-path).
+    let productsDir = Bundle(for: PluginInvoker.self).bundleURL
+      .deletingLastPathComponent()
+    let siblingPath = productsDir.appendingPathComponent("libosaurus-vision.dylib").path
+    if fm.fileExists(atPath: siblingPath) {
+      return siblingPath
+    }
+
+    // Fall back to conventional cwd-relative build locations.
     let possiblePaths = [
       ".build/debug/libosaurus-vision.dylib",
       ".build/release/libosaurus-vision.dylib",
@@ -319,9 +330,7 @@ final class PluginInvoker: @unchecked Sendable {
       ".build/arm64-apple-macosx/release/libosaurus-vision.dylib",
     ]
 
-    let fm = FileManager.default
     let cwd = fm.currentDirectoryPath
-
     for path in possiblePaths {
       let fullPath = "\(cwd)/\(path)"
       if fm.fileExists(atPath: fullPath) {
@@ -329,8 +338,7 @@ final class PluginInvoker: @unchecked Sendable {
       }
     }
 
-    // Default to debug path
-    return "\(cwd)/.build/arm64-apple-macosx/debug/libosaurus-vision.dylib"
+    return siblingPath
   }
 
   func invoke(tool: String, args: [String: Any]) -> [String: Any] {
